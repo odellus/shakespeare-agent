@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# secrets
+.env
+
+# data
+*.txt
+
+
+# logs
+*.log
+
+# indexes
+hamlet_index
+play_indexes
+plays
+shakespeare_index
+character_indexes
