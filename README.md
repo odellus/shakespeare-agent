@@ -15,8 +15,8 @@ flowchart TD
     A[shakespeare.txt<br/>Project Gutenberg complete works] --> B[segment_shakespeare.py]
     B --> C[plays/&lt;play_slug&gt;/&lt;SPEAKER&gt;.txt]
     B --> D[plays/manifest.json]
-    C --> E[index_plays.py]
-    E --> F[play_indexes/&lt;play_slug&gt;/<br/>FAISS + docstore]
+    C --> E[index_characters.py]
+    E --> F[character_indexes/&lt;play_slug&gt;/&lt;speaker&gt;/<br/>FAISS + docstore]
     A --> G[index_shakespeare.py]
     G --> H[shakespeare_index/<br/>full-works FAISS index]
     F --> I[chat.py]
@@ -64,16 +64,15 @@ r"^([A-Z][A-Z\s',]+)\.\n(.*?)(?=\n[A-Z][A-Z\s',]+\.\n|\Z)"
 - Filter out fake "speakers" like `SCENE`, `ACT`, `ENTER`, `EXIT`
 - Drop bit-part actors with < 100 characters of dialogue
 
-### 3. Per-Play FAISS Indexing (`index_plays.py`)
+### 3. Per-Character FAISS Indexing (`index_characters.py`)
 
-For each play:
-1. Read every speaker file
+For each play, for each speaker with sufficient dialogue:
+1. Read the speaker's `.txt` file
 2. Chunk with `RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)`
-3. Tag every chunk with `{"speaker": "HAMLET", "chunk_idx": 0}` metadata
-4. Embed with `OllamaEmbeddings(model="nomic-embed-text-v2-moe:latest")`
-5. Build one `FAISS` index per play and save to `play_indexes/<play_slug>/`
+3. Embed with `OllamaEmbeddings(model="nomic-embed-text-v2-moe:latest")`
+4. Build a **dedicated `FAISS` index for that character** and save to `character_indexes/<play_slug>/<speaker>/`
 
-Result: ~40 indexes, ~4,500 total chunks across all plays.
+Result: **~1,200 character-specific indexes**. When you chat with Hamlet, you search *Hamlet's own index* — not a play-wide index with post-hoc filtering.
 
 ---
 
@@ -95,13 +94,12 @@ Result: ~40 indexes, ~4,500 total chunks across all plays.
 No compiled agent graph here — we stream directly from the model:
 
 1. User picks a **play** and a **character**
-2. Load that play's FAISS index
-3. `store.similarity_search(query, k=30)` → retrieve top chunks
-4. **Filter by speaker:** `character_docs = [r for r in results if r.metadata["speaker"] == speaker]`
-5. Build a system prompt with the character's own lines as grounding context
-6. `model.astream(messages)` → real token streaming into Gradio
+2. Load that character's **dedicated FAISS index**: `character_indexes/<play>/<speaker>/`
+3. `store.similarity_search(query, k=4)` → retrieve only that character's lines
+4. Build a system prompt with the character's own words as grounding context
+5. `model.astream(messages)` → real token streaming into Gradio
 
-This avoids the buffering issue we hit with `create_agent` + `dynamic_prompt` middleware, and gives us full control over retrieval and prompt construction.
+This avoids the buffering issue we hit with `create_agent` + `dynamic_prompt` middleware, and retrieval is precise because every character has their own embedded index.
 
 ---
 
@@ -132,16 +130,9 @@ for chunk, metadata in agent.astream(input, stream_mode="messages"):
   ```
 - `metadata={"title": "...", "status": "pending" | "done"}` renders collapsible accordions
 
-### FAISS metadata filtering
+### Per-character indexes vs. play-wide + filter
 
-FAISS itself doesn't do metadata filtering at the index level (in the community version). The practical pattern:
-
-```python
-results = store.similarity_search(query, k=30)
-character_docs = [r for r in results if r.metadata["speaker"] == target_speaker]
-```
-
-Retrieve generously, then filter in Python. Works fine for demo-scale indexes.
+We started with one index per play and filtered results by speaker in Python. That works, but it's a hack — you're retrieving from a mixed corpus and throwing away most results. Building **one index per character** (~1,200 total) is the cleaner pattern: each embedding space contains only that character's voice, so retrieval is precise and the vector math isn't polluted by other speakers' dialogue.
 
 ---
 
@@ -150,14 +141,14 @@ Retrieve generously, then filter in Python. Works fine for demo-scale indexes.
 | File | Purpose |
 |------|---------|
 | `segment_shakespeare.py` | Regex-based play + speaker extraction |
-| `index_plays.py` | Builds per-play FAISS indexes |
+| `index_characters.py` | Builds per-character FAISS indexes |
 | `index_shakespeare.py` | Original full-works indexer (used by Scholar agent) |
 | `chat.py` | Gradio app with scholar + character chat |
 | `test_character_chat.py` | Standalone CLI test for character streaming |
 | `agent.py` | Standalone CLI test for tool + middleware agents |
 | `shakespeare.txt` | Raw Gutenberg complete works (~5.5 MB) |
 | `plays/` | 44 directories, one per play, containing `<SPEAKER>.txt` files |
-| `play_indexes/` | 40 FAISS indexes (plays with sufficient dialogue) |
+| `character_indexes/` | ~1,200 FAISS indexes (one per character) |
 | `shakespeare_index/` | Full-works FAISS index (3,161 chunks) |
 
 ---
@@ -168,9 +159,9 @@ Retrieve generously, then filter in Python. Works fine for demo-scale indexes.
 # 1. Install deps
 uv sync
 
-# 2. Build play indexes (one-time)
+# 2. Build character indexes (one-time)
 uv run python segment_shakespeare.py
-uv run python index_plays.py
+uv run python index_characters.py
 
 # 3. Launch Gradio app
 uv run python chat.py
